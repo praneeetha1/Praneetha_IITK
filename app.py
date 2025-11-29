@@ -4,6 +4,8 @@ from typing import List, Dict, Any
 import os
 import requests
 from dotenv import load_dotenv
+from fastapi.responses import JSONResponse
+
 
 load_dotenv()
 
@@ -16,6 +18,7 @@ VERYFI_SANDBOX = os.getenv("VERYFI_SANDBOX", "false").lower() == "true"
 VERYFI_BASE_URL = "https://api.veryfi.com/api/v8"
 
 app = FastAPI()
+
 
 
 class BillItem(BaseModel):
@@ -40,7 +43,7 @@ class TokenUsage(BaseModel):
 class DataOut(BaseModel):
     pagewise_line_items: List[PageItems]
     total_item_count: int
-    reconciled_amount: float  # final total 
+    # reconciled_amount: float  
 
 
 class ExtractResponse(BaseModel):
@@ -51,6 +54,15 @@ class ExtractResponse(BaseModel):
 
 class ExtractRequest(BaseModel):
     document: str
+
+
+def infer_page_type(veryfi_doc: Dict[str, Any]) -> str:
+    vendor_name = (veryfi_doc.get("vendor", {}) or {}).get("name", "") or ""
+    text = f"{vendor_name}".lower()
+    if "pharma" in text or "pharmacy" in text or "chemist" in text:
+        return "Pharmacy"
+    return "Bill Detail"
+
 
 
 def call_veryfi_process_document_from_url(file_url: str) -> Dict[str, Any]:
@@ -108,34 +120,37 @@ def map_veryfi_to_our_schema(veryfi_doc: Dict[str, Any]) -> DataOut:
 
     page = PageItems(
         page_no="1",
-        page_type="Final Bill",
+        page_type=infer_page_type(veryfi_doc),
         bill_items=bill_items,
     )
 
-    total_bill_amount = float(veryfi_doc.get("total", 0.0) or 0.0)
+    # total_bill_amount = float(veryfi_doc.get("total", 0.0) or 0.0)
 
     return DataOut(
         pagewise_line_items=[page],
         total_item_count=len(bill_items),
-        reconciled_amount=total_bill_amount,
+        # reconciled_amount=total_bill_amount,
     )
+
 
 
 @app.post("/extract-bill-data", response_model=ExtractResponse)
 async def extract_bill_data(req: ExtractRequest):
-    """
-    Submission endpoint.
-    Input: { "document": "<DOCUMENT_URL>" }
-    We pass document as file_url to Veryfi, then map their response to required schema.
-    """
     file_url = req.document
-
-    veryfi_doc = call_veryfi_process_document_from_url(file_url)
-
-    data = map_veryfi_to_our_schema(veryfi_doc)
+    try:
+        veryfi_doc = call_veryfi_process_document_from_url(file_url)
+        data = map_veryfi_to_our_schema(veryfi_doc)
+    except HTTPException as e:
+        # custom error body
+        return JSONResponse(
+            status_code=e.status_code,
+            content={
+                "is_success": False,
+                "message": f"Failed to process document. {e.detail}",
+            },
+        )
 
     token_usage = TokenUsage(total_tokens=0, input_tokens=0, output_tokens=0)
-
     return ExtractResponse(
         is_success=True,
         token_usage=token_usage,
